@@ -252,7 +252,9 @@ typedef struct dhd_info {
 	bool dhd_tasklet_create;
 #endif /* DHDTHREAD */
 	tsk_ctl_t	thr_sysioc_ctl;
-
+	/* locks  mac ioctl funcs which are in sys_ioc thr context  */
+	struct semaphore mac_ioc_sema;
+#define LOCK_TRACE(x)
 	/* Wakelocks */
 #if defined(CONFIG_HAS_WAKELOCK) && (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 27))
 	struct wake_lock wl_wifi;   /* Wifi wakelock */
@@ -381,6 +383,7 @@ module_param_string(iface_name, iface_name, IFNAMSIZ, 0);
 
 /* IOCTL response timeout */
 int dhd_ioctl_timeout_msec = IOCTL_RESP_TIMEOUT;
+dhd_info_t *g_dhd = NULL;
 
 /* Idle timeout for backplane clock */
 int dhd_idletime = DHD_IDLETIME_TICKS;
@@ -1106,6 +1109,22 @@ _dhd_sysioc_thread(void *data)
 					continue;
 				}
 #endif /* SOFTAP */
+
+				LOCK_TRACE(("%s: grabing mac_ioc_sema ...\n", __FUNCTION__));
+				if (down_interruptible(&dhd->mac_ioc_sema) == 0) {
+					SMP_RD_BARRIER_DEPENDS();
+					if (tsk->terminated) {
+						LOCK_TRACE(("%s: GOT mac_ioc sema, "
+							"but thr terminated\n", __FUNCTION__));
+						up(&dhd->mac_ioc_sema);
+						break;
+					}
+				} else {
+					LOCK_TRACE(("%s: didn't get mac_sema,"
+						" interrupted by sig\n", __FUNCTION__));
+					break;
+				}
+
 				if (dhd->iflist[i]->set_multicast) {
 					dhd->iflist[i]->set_multicast = FALSE;
 					_dhd_set_multicast_list(dhd, i);
@@ -1114,6 +1133,8 @@ _dhd_sysioc_thread(void *data)
 					dhd->set_macaddress = FALSE;
 					_dhd_set_mac_address(dhd, i, &dhd->macvalue);
 				}
+				/* release mac ioc sema  */
+				up(&dhd->mac_ioc_sema);
 			}
 		}
 
@@ -1137,7 +1158,7 @@ dhd_set_mac_address(struct net_device *dev, void *addr)
 	if (ifidx == DHD_BAD_IF)
 		return -1;
 
-	ASSERT(&dhd->thr_sysioc_ctl.thr_pid >= 0);
+	ASSERT(dhd->thr_sysioc_ctl.thr_pid >= 0);
 	memcpy(&dhd->macvalue, sa->sa_data, ETHER_ADDR_LEN);
 	dhd->set_macaddress = TRUE;
 	up(&dhd->thr_sysioc_ctl.sema);
@@ -1155,7 +1176,7 @@ dhd_set_multicast_list(struct net_device *dev)
 	if (ifidx == DHD_BAD_IF)
 		return;
 
-	ASSERT(&dhd->thr_sysioc_ctl.thr_pid >= 0);
+	ASSERT(dhd->thr_sysioc_ctl.thr_pid >= 0);
 	dhd->iflist[ifidx]->set_multicast = TRUE;
 	up(&dhd->thr_sysioc_ctl.sema);
 }
@@ -2458,7 +2479,7 @@ dhd_add_if(dhd_info_t *dhd, int ifidx, void *handle, char *name,
 		ifp->state = DHD_IF_ADD;
 		ifp->idx = ifidx;
 		ifp->bssidx = bssidx;
-		ASSERT(&dhd->thr_sysioc_ctl.thr_pid >= 0);
+		ASSERT(dhd->thr_sysioc_ctl.thr_pid >= 0);
 		up(&dhd->thr_sysioc_ctl.sema);
 	} else
 		ifp->net = (struct net_device *)handle;
@@ -2482,7 +2503,7 @@ dhd_del_if(dhd_info_t *dhd, int ifidx)
 
 	ifp->state = DHD_IF_DEL;
 	ifp->idx = ifidx;
-	ASSERT(&dhd->thr_sysioc_ctl.thr_pid >= 0);
+	ASSERT(dhd->thr_sysioc_ctl.thr_pid >= 0);
 	up(&dhd->thr_sysioc_ctl.sema);
 }
 
@@ -2515,6 +2536,10 @@ dhd_attach(osl_t *osh, struct dhd_bus *bus, uint bus_hdrlen)
 	}
 	memset(dhd, 0, sizeof(dhd_info_t));
 
+	/*   save ptr to dhd , we'll need it in module exit */
+	g_dhd = dhd;
+	/* semaphore to protect critical section in sysioc thread */
+	sema_init(&dhd->mac_ioc_sema, 1);
 #ifdef DHDTHREAD
 	dhd->thr_dpc_ctl.thr_pid = DHD_PID_KT_TL_INVALID;
 	dhd->thr_wdt_ctl.thr_pid = DHD_PID_KT_INVALID;
@@ -3494,7 +3519,10 @@ void dhd_detach(dhd_pub_t *dhdp)
 	}
 #endif /* defined(CONFIG_WIRELESS_EXT) */
 
-	if (&dhd->thr_sysioc_ctl.thr_pid >= 0) {
+	dhd->thr_sysioc_ctl.terminated = true;
+	up(&dhd->mac_ioc_sema);
+	LOCK_TRACE(("released mac_sema & stop thr_sysioc_ctl) \n"));
+	if (dhd->thr_sysioc_ctl.thr_pid >= 0) {
 		PROC_STOP(&dhd->thr_sysioc_ctl);
 	}
 
@@ -3599,6 +3627,17 @@ static void __exit
 dhd_module_cleanup(void)
 {
 	DHD_TRACE(("%s: Enter\n", __FUNCTION__));
+
+	LOCK_TRACE(("%s: grabing mac_ioc_sema ...  \n", __FUNCTION__));
+
+	ASSERT(g_dhd != NULL);
+
+	if (g_dhd && down_interruptible(&g_dhd->mac_ioc_sema) == 0) {
+		LOCK_TRACE(("%s: GOT mac_ioc_sema  \n", __FUNCTION__));
+	} else {
+		DHD_ERROR(("%s, didn't get  mac _sema,"
+			" interrupted by sig)\n", __FUNCTION__));
+	}
 
 	dhd_bus_unregister();
 

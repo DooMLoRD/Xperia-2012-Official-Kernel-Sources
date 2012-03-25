@@ -63,6 +63,8 @@ void device_set_cap(struct btd_device *device, uint8_t cap);
 uint8_t device_get_cap(struct btd_device *device);
 void device_set_auth(struct btd_device *device, uint8_t auth);
 uint8_t device_get_auth(struct btd_device *device);
+void device_set_local_auth(struct btd_device *device, uint8_t auth);
+uint8_t device_get_local_auth(struct btd_device *device);
 gboolean device_is_connected(struct btd_device *device);
 gboolean device_get_secmode3_conn(struct btd_device *device);
 void device_set_secmode3_conn(struct btd_device *device, gboolean enable);
@@ -85,8 +87,9 @@ gboolean device_is_authenticating(struct btd_device *device);
 gboolean device_is_authorizing(struct btd_device *device);
 void device_set_authorizing(struct btd_device *device, gboolean auth);
 void device_set_renewed_key(struct btd_device *device, gboolean renewed);
-gboolean device_set_debug_key(struct btd_device *device, uint8_t *key);
-gboolean device_get_debug_key(struct btd_device *device, uint8_t *key);
+int device_set_link_key(struct btd_device *device, uint8_t *key, uint8_t type,
+						int pin_length, gboolean store);
+int device_get_link_key(struct btd_device *device, uint8_t *key, uint8_t *type);
 void device_add_connection(struct btd_device *device, DBusConnection *conn,
 				uint16_t handle);
 uint16_t device_get_handle(struct btd_device *device);

@@ -313,6 +313,12 @@ static void link_key_request(int dev, bdaddr_t *sba, bdaddr_t *dba)
 	if (!get_adapter_and_device(sba, dba, &adapter, &device, FALSE))
 		device = NULL;
 
+	if (!device) {
+		DBG("device is not allocated");
+		hci_send_cmd(dev, OGF_LINK_CTL, OCF_LINK_KEY_NEG_REPLY, 6, dba);
+		return;
+	}
+
 	ba2str(sba, sa); ba2str(dba, da);
 	info("link_key_request (sba=%s, dba=%s)", sa, da);
 
@@ -331,9 +337,16 @@ static void link_key_request(int dev, bdaddr_t *sba, bdaddr_t *dba)
 
 	device_prepare_features(device);
 
-	if (main_opts.debug_keys && device && device_get_debug_key(device, key))
-		type = 0x03;
-	else if (read_link_key(sba, dba, key, &type) < 0 || type == 0x03) {
+	if (device_get_link_key(device, key, &type) < 0) {
+		/* Link key not found */
+		hci_send_cmd(dev, OGF_LINK_CTL, OCF_LINK_KEY_NEG_REPLY, 6, dba);
+		return;
+	}
+
+	if (type == 0x03 && !main_opts.debug_keys) {
+		/* Clear key */
+		device_set_link_key(device, NULL, 0xff, 0, FALSE);
+
 		/* Link key not found */
 		hci_send_cmd(dev, OGF_LINK_CTL, OCF_LINK_KEY_NEG_REPLY, 6, dba);
 		return;
@@ -365,16 +378,18 @@ static void link_key_notify(int dev, bdaddr_t *sba, void *ptr)
 	bdaddr_t *dba = &evt->bdaddr;
 	char sa[18], da[18];
 	int dev_id, err;
-	unsigned char old_key[16];
-	uint8_t old_key_type;
+	uint8_t old_key_type = 0xff;
+	struct btd_adapter *adapter;
+	struct btd_device *device;
 
 	ba2str(sba, sa); ba2str(dba, da);
 	info("link_key_notify (sba=%s, dba=%s, type=%d)", sa, da,
 							evt->key_type);
 
-	err = read_link_key(sba, dba, old_key, &old_key_type);
-	if (err < 0)
-		old_key_type = 0xff;
+	adapter = manager_find_adapter(sba);
+	device = adapter_find_device(adapter, da);
+
+	device_get_link_key(device, NULL, &old_key_type);
 
 	dev_id = hci_devid(sa);
 	if (dev_id < 0)

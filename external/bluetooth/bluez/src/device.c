@@ -129,6 +129,8 @@ struct btd_device {
 	uint8_t		cap;
 	uint8_t		auth;
 
+	uint8_t		local_auth;
+
 	uint16_t	handle;			/* Connection handle */
 
 	/* Whether were creating a security mode 3 connection */
@@ -144,8 +146,8 @@ struct btd_device {
 	gboolean	authorizing;
 	gint		ref;
 
-	gboolean	has_debug_key;
-	uint8_t		debug_key[16];
+	uint8_t		link_key_type;
+	uint8_t		link_key[16];
 	uint8_t		features[8];
 	uint8_t		qos_role;
 };
@@ -1097,6 +1099,8 @@ struct btd_device *device_create(DBusConnection *conn,
 		device_block(conn, device);
 
 	device->auth = 0xff;
+	device->local_auth = 0xff;
+	device_set_link_key(device, NULL, 0xff, 0, FALSE);
 
 	if (read_link_key(&src, &device->bdaddr, NULL, NULL) == 0)
 		device->paired = TRUE;
@@ -1793,6 +1797,19 @@ uint8_t device_get_auth(struct btd_device *device)
 	return device->auth;
 }
 
+void device_set_local_auth(struct btd_device *device, uint8_t auth)
+{
+	if (!device)
+		return;
+
+	device->local_auth = auth;
+}
+
+uint8_t device_get_local_auth(struct btd_device *device)
+{
+	return device->local_auth;
+}
+
 static gboolean start_discovery(gpointer user_data)
 {
 	struct btd_device *device = user_data;
@@ -2164,6 +2181,7 @@ void device_bonding_complete(struct btd_device *device, uint8_t status)
 	}
 
 	device->auth = 0xff;
+	device->local_auth = 0xff;
 
 	g_free(device->authr);
 	device->authr = NULL;
@@ -2549,28 +2567,57 @@ const sdp_record_t *btd_device_get_record(struct btd_device *device,
 	return find_record_in_list(device->tmp_records, uuid);
 }
 
-gboolean device_set_debug_key(struct btd_device *device, uint8_t *key)
+int device_set_link_key(struct btd_device *device, uint8_t *key, uint8_t type,
+						int pin_length, gboolean store)
 {
-	if (key == NULL) {
-		device->has_debug_key = FALSE;
-		return TRUE;
+	int err = 0;
+
+	if (key) {
+		memcpy(device->link_key, key, 16);
+
+		if (store) {
+			bdaddr_t local;
+
+			adapter_get_address(device_get_adapter(device), &local);
+
+			DBG("storing link key of type 0x%02x", type);
+
+			err = write_link_key(&local, &device->bdaddr, key, type,
+								pin_length);
+			if (err < 0)
+				error("write_link_key: %s (%d)", strerror(-err),
+									err);
+		} else
+			DBG("link key of type 0x%02x in runtime memory", type);
 	}
 
-	memcpy(device->debug_key, key, 16);
-	device->has_debug_key = TRUE;
+	if (err == 0)
+		device->link_key_type = type;
 
-	return TRUE;
+	return err;
 }
 
-gboolean device_get_debug_key(struct btd_device *device, uint8_t *key)
+int device_get_link_key(struct btd_device *device, uint8_t *key, uint8_t *type)
 {
-	if (!device->has_debug_key)
-		return FALSE;
+	int err = 0;
 
-	if (key != NULL)
-		memcpy(key, device->debug_key, 16);
+	if (device->link_key_type == 0xff) {
+		bdaddr_t local;
+		adapter_get_address(device_get_adapter(device), &local);
 
-	return TRUE;
+		err = read_link_key(&local, &device->bdaddr, device->link_key,
+							&device->link_key_type);
+	}
+
+	if (err == 0) {
+		if (key)
+			memcpy(key, device->link_key, 16);
+
+		if (type)
+			*type = device->link_key_type;
+	}
+
+	return err;
 }
 
 int btd_register_device_driver(struct btd_device_driver *driver)

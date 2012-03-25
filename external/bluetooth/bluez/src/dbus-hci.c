@@ -335,6 +335,9 @@ static void io_capa_oob_response(struct btd_adapter *adapter, struct btd_device 
 	int dd;
 	uint16_t dev_id = adapter_get_dev_id(adapter);
 
+	/* Save final authentication requirements for device */
+	device_set_local_auth(device, auth);
+
 	dd = hci_open_dev(dev_id);
 	if (dd < 0) {
 		error("Unable to open hci%d", dev_id);
@@ -445,10 +448,7 @@ int hcid_dbus_user_confirm(bdaddr_t *sba, bdaddr_t *dba, uint32_t passkey)
 	if (!get_adapter_and_device(sba, dba, &adapter, &device, TRUE))
 		return -ENODEV;
 
-	if (get_auth_requirements(sba, dba, &loc_auth) < 0) {
-		error("Unable to get local authentication requirements");
-		goto fail;
-	}
+	loc_auth = device_get_local_auth(device);
 
 	agent = device_get_agent(device);
 	if (agent == NULL) {
@@ -802,7 +802,8 @@ int hcid_dbus_link_key_notify(bdaddr_t *local, bdaddr_t *peer,
 	struct btd_device *device;
 	struct btd_adapter *adapter;
 	uint8_t local_auth = 0xff, remote_auth, new_key_type;
-	gboolean bonding, temporary = FALSE;
+	gboolean bonding, temporary, store;
+	int err;
 
 	if (!get_adapter_and_device(local, peer, &adapter, &device, TRUE))
 		return -ENODEV;
@@ -810,8 +811,6 @@ int hcid_dbus_link_key_notify(bdaddr_t *local, bdaddr_t *peer,
 	new_key_type = key_type;
 
 	if (key_type == 0x06) {
-		if (device_get_debug_key(device, NULL))
-			old_key_type = 0x03;
 		if (old_key_type != 0xff)
 			new_key_type = old_key_type;
 		else
@@ -820,7 +819,7 @@ int hcid_dbus_link_key_notify(bdaddr_t *local, bdaddr_t *peer,
 			return 0;
 	}
 
-	get_auth_requirements(local, peer, &local_auth);
+	local_auth = device_get_local_auth(device);
 	remote_auth = device_get_auth(device);
 	bonding = device_is_bonding(device, NULL);
 
@@ -829,9 +828,6 @@ int hcid_dbus_link_key_notify(bdaddr_t *local, bdaddr_t *peer,
 
 	DBG("local auth 0x%02x and remote auth 0x%02x",
 					local_auth, remote_auth);
-
-	/* Clear any previous debug key */
-	device_set_debug_key(device, NULL);
 
 	/* If this is not the first link key set a flag so a subsequent auth
 	 * complete event doesn't trigger SDP and remove any stored key */
@@ -853,32 +849,23 @@ int hcid_dbus_link_key_notify(bdaddr_t *local, bdaddr_t *peer,
 	 * If none of the above match only keep the link key around for
 	 * this connection and set the temporary flag for the device.
 	 */
-	if (new_key_type == 0x03) {
-		DBG("Storing debug key in runtime memory");
-		device_set_debug_key(device, key);
-	} else if (key_type < 0x03 ||
-				(key_type == 0x06 && old_key_type != 0xff) ||
-				(local_auth > 0x01 && remote_auth > 0x01) ||
-				(local_auth == 0x02 || local_auth == 0x03) ||
-				(remote_auth == 0x02 || remote_auth == 0x03)) {
-		int err;
 
-		DBG("storing link key of type 0x%02x", key_type);
+	store = (new_key_type != 0x03) && (key_type < 0x03 ||
+			(key_type == 0x06 && old_key_type != 0xff) ||
+			(local_auth > 0x01 && remote_auth > 0x01) ||
+			(local_auth == 0x02 || local_auth == 0x03) ||
+			(remote_auth == 0x02 || remote_auth == 0x03));
 
-		err = write_link_key(local, peer, key, new_key_type,
-								pin_length);
-		if (err < 0) {
-			error("write_link_key: %s (%d)", strerror(-err), -err);
-			return err;
-		}
-	} else
-		temporary = TRUE;
+	err = device_set_link_key(device, key, new_key_type, pin_length, store);
+	if (err < 0 )
+		return err;
 
 	if (!device_is_connected(device))
 		device_set_secmode3_conn(device, TRUE);
 	else if (!bonding && old_key_type == 0xff)
 		hcid_dbus_bonding_process_complete(local, peer, 0);
 
+	temporary = (new_key_type != 0x03) && !store;
 	device_set_temporary(device, temporary);
 
 	return 0;
@@ -1073,6 +1060,7 @@ int hcid_dbus_get_io_cap(bdaddr_t *local, bdaddr_t *remote)
 	if (!get_adapter_and_device(local, remote, &adapter, &device, TRUE))
 		return -ENODEV;
 
+	/* Get initial auth requirements from kernel */
 	if (get_auth_requirements(local, remote, &auth) < 0)
 		return -1;
 
